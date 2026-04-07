@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import { createOpenAICompatibleRuntime } from "./openai-compatible.js";
 
 function normalizeAssistantMessage(message = {}) {
   return {
@@ -56,16 +56,13 @@ export function createRuntime(options = {}) {
     throw new Error(`Unsupported LLM runtime: ${mode}`);
   }
 
-  const client = new OpenAI({
-    baseURL: options.baseURL || process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-    apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
-    timeout: options.timeout ?? 5 * 60 * 1000,
-  });
+  const provider = createOpenAICompatibleRuntime(options);
 
   return {
     mode,
+    provider: provider.name,
     async complete({ model, messages, tools, toolChoice, temperature, maxTokens }) {
-      const response = await client.chat.completions.create({
+      const response = await provider.createChatCompletion({
         model,
         messages: messages.map(toProviderMessage),
         tools,
