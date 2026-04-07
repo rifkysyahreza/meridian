@@ -116,8 +116,9 @@ export function createOpenClawCodexRuntime(options = {}) {
       ];
 
       let stdout;
+      let stderr;
       try {
-        ({ stdout } = await execFileAsync(command, args, {
+        ({ stdout, stderr } = await execFileAsync(command, args, {
           timeout,
           maxBuffer: 1024 * 1024 * 8,
           env: process.env,
@@ -133,7 +134,7 @@ export function createOpenClawCodexRuntime(options = {}) {
         );
       }
 
-      const parsedResult = tryParseJsonObject(stdout);
+      const parsedResult = tryParseJsonObject(stdout) || tryParseJsonObject(`${stdout || ""}\n${stderr || ""}`);
       if (!parsedResult) {
         throw new Error("OpenClaw runtime bridge returned output that did not contain a JSON result.");
       }
