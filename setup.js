@@ -163,11 +163,6 @@ console.log("── API Keys & Wallet ──────────────
 
 const alreadySet = (val) => val ? "*** (already set — Enter to keep)" : "";
 
-const openrouterKey = await ask(
-  "OpenRouter API key (sk-or-...)",
-  alreadySet(ev("OPENROUTER_API_KEY", ""))
-);
-
 const walletKey = await ask(
   "Wallet private key (base58)",
   alreadySet(ev("WALLET_PRIVATE_KEY", existingConfig.walletKey || ""))
@@ -357,6 +352,7 @@ let llmBaseUrl = e("llmBaseUrl", "");
 let llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
 let llmApiKey = llmApiKeyExisting;
 let llmModelDefault = e("llmModel", process.env.LLM_MODEL || provider.modelDefault);
+let openrouterKey = existingEnv.OPENROUTER_API_KEY || "";
 let openClawAgentCommand = e("openClawAgentCommand", existingEnv.OPENCLAW_AGENT_COMMAND || DEFAULT_OPENCLAW_COMMAND);
 let openClawAgentTimeoutMs = e("openClawAgentTimeoutMs", parseInt(existingEnv.OPENCLAW_AGENT_TIMEOUT_MS || "300000", 10));
 let openClawAgentSessionPrefix = e("openClawAgentSessionPrefix", existingEnv.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge");
@@ -367,6 +363,7 @@ if (llmRuntime === "openai-chat") {
   provider = LLM_PROVIDERS.find((p) => p.key === providerChoice.key);
 
   llmBaseUrl = provider.baseUrl;
+  console.log(`\nUsing ${provider.label}.`);
   if (provider.key === "local" || provider.key === "custom") {
     llmBaseUrl = await ask("Base URL", e("llmBaseUrl", provider.baseUrl || "http://localhost:1234/v1"));
   }
@@ -374,8 +371,14 @@ if (llmRuntime === "openai-chat") {
   llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
   const llmApiKeyRaw = await ask("API Key", llmApiKeyExisting ? "*** (already set)" : (provider.keyHint || ""));
   llmApiKey = llmApiKeyRaw.startsWith("***") ? llmApiKeyExisting : llmApiKeyRaw;
+  if (provider.key === "openrouter") {
+    openrouterKey = llmApiKey;
+  }
   llmModelDefault = e("llmModel", process.env.LLM_MODEL || provider.modelDefault);
 } else {
+  console.log("Before launching Meridian in bridge mode, make sure OpenClaw itself is logged into Codex. Recommended once per machine/profile:");
+  console.log("  openclaw onboard --auth-choice openai-codex");
+  console.log("  # or: openclaw models auth login --provider openai-codex\n");
   openClawAgentCommand = await ask("OpenClaw command", e("openClawAgentCommand", existingEnv.OPENCLAW_AGENT_COMMAND || DEFAULT_OPENCLAW_COMMAND));
   openClawAgentTimeoutMs = await askNum(
     "OpenClaw timeout (ms)",
@@ -482,6 +485,6 @@ console.log(`
   .env:         ${ENV_PATH}
   Config:       ${CONFIG_PATH}
 
-Run "npm start" to launch the agent.
-${dryRun ? '\n  ⚠ DRY RUN is ON — set dryRun: false in user-config.json when ready for live trading.\n' : ""}
+Run "npm run dev" for a safe first launch, then "npm start" when ready.
+${llmRuntime === "openclaw-codex" ? '  OpenClaw auth: openclaw onboard --auth-choice openai-codex\n' : ""}${dryRun ? '\n  ⚠ DRY RUN is ON — set dryRun: false in user-config.json when ready for live trading.\n' : ""}
 `);

@@ -64,7 +64,36 @@ npm install
 npm run setup
 ```
 
-The wizard walks you through creating `.env` (API keys, wallet, RPC, Telegram) and `user-config.json` (risk preset, deploy size, thresholds, runtime, models). Takes about 2 minutes.
+The wizard walks you through creating `.env` (wallet, RPC, Telegram, runtime bridge settings) and `user-config.json` (risk preset, deploy size, thresholds, runtime, models). Takes about 2 minutes.
+
+If you want to run Meridian through **OpenClaw + Codex login**, the wizard now has a dedicated runtime choice for that path and does **not** require an OpenRouter key.
+
+### 3. OpenClaw/Codex quick start
+
+Do this once on the machine/profile where Meridian will run:
+
+```bash
+openclaw onboard --auth-choice openai-codex
+# or, if OpenClaw is already set up:
+openclaw models auth login --provider openai-codex
+```
+
+Then run `npm run setup` and choose:
+
+- **LLM runtime:** `OpenClaw/Codex local bridge (MVP)`
+- **OpenClaw command:** `openclaw`
+- **OpenClaw timeout:** `300000`
+- **OpenClaw session prefix:** `meridian-openclaw-bridge`
+- **OpenClaw extra args:** `--thinking low`
+- **Model name:** `openai-codex/gpt-5.4`
+
+**Recommended first launch:**
+
+```bash
+npm run dev
+```
+
+That keeps `DRY_RUN=true` while confirming your wallet, config, and Codex bridge are working. Switch to `npm start` only when you are ready to trade live.
 
 **Or set up manually:**
 
@@ -73,15 +102,18 @@ Create `.env`:
 ```env
 WALLET_PRIVATE_KEY=your_base58_private_key
 RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-LLM_RUNTIME=openai-chat                # or `openclaw-codex`
-OPENROUTER_API_KEY=sk-or-...            # OpenAI-compatible runtime
-# OPENCLAW_AGENT_COMMAND=openclaw       # OpenClaw/Codex bridge runtime
+LLM_RUNTIME=openai-chat
+OPENROUTER_API_KEY=sk-or-...                  # only for OpenAI-compatible runtime
+# LLM_RUNTIME=openclaw-codex                  # uncomment for OpenClaw/Codex bridge mode
+# OPENCLAW_AGENT_COMMAND=openclaw
 # OPENCLAW_AGENT_TIMEOUT_MS=300000
+# OPENCLAW_AGENT_SESSION_PREFIX=meridian-openclaw-bridge
 # OPENCLAW_AGENT_EXTRA_ARGS=--thinking low
-HELIUS_API_KEY=your_helius_key          # for wallet balance lookups
-TELEGRAM_BOT_TOKEN=123456:ABC...        # optional — for notifications + chat
-TELEGRAM_CHAT_ID=                       # auto-filled on first message
-DRY_RUN=true                            # set false for live trading
+HELIUS_API_KEY=your_helius_key                # for wallet balance lookups
+TELEGRAM_BOT_TOKEN=123456:ABC...              # optional — notifications + chat
+TELEGRAM_CHAT_ID=                             # required for inbound Telegram control
+TELEGRAM_ALLOWED_USER_IDS=                    # required for group control; optional in 1:1 chats
+DRY_RUN=true                                  # set false for live trading
 ```
 
 > Never put your private key or API keys in `user-config.json` — use `.env` only. Both files are gitignored.
@@ -428,8 +460,18 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `screeningModel` | `openai/gpt-oss-20b:free` | LLM for screening cycles |
 | `generalModel` | `openai/gpt-oss-20b:free` | LLM for REPL / chat |
 
-<<<<<<< HEAD
 > Override model at runtime: `node cli.js config set screeningModel anthropic/claude-opus-4-5`
+
+### OpenClaw bridge fields
+
+These only apply when `llmRuntime` is `openclaw-codex`:
+
+| Field | Default | Description |
+|---|---|---|
+| `openClawAgentCommand` | `openclaw` | CLI Meridian launches for each bridge request |
+| `openClawAgentTimeoutMs` | `300000` | Max time Meridian waits for an OpenClaw response |
+| `openClawAgentSessionPrefix` | `meridian-openclaw-bridge` | Prefix for per-request OpenClaw session ids |
+| `openClawAgentExtraArgs` | `--thinking low` | Extra flags passed to `openclaw agent --local` |
 
 ---
 
@@ -540,7 +582,32 @@ OPENCLAW_AGENT_SESSION_PREFIX=meridian-openclaw-bridge
 OPENCLAW_AGENT_EXTRA_ARGS=--thinking low
 ```
 
-This MVP uses the local `openclaw agent` CLI as a bridge runtime. The explicit runtime switch keeps OpenClaw-specific process/auth plumbing separate from the default OpenAI-compatible path, so the old flow keeps working unchanged.
+This MVP uses the local `openclaw agent --local` CLI path as a bridge runtime. The explicit runtime switch keeps OpenClaw-specific process/auth plumbing separate from the default OpenAI-compatible path, so the old flow keeps working unchanged.
+
+Before first launch on a machine/profile, log OpenClaw into Codex once:
+
+```bash
+openclaw onboard --auth-choice openai-codex
+# or: openclaw models auth login --provider openai-codex
+```
+
+Then launch Meridian with:
+
+```bash
+npm run dev
+```
+
+If that looks good, switch to live mode with:
+
+```bash
+npm start
+```
+
+Bridge polish in this milestone:
+- retries transient bridge failures automatically with short backoff
+- parses noisy JSON/JSONL bridge output more defensively
+- surfaces clearer auth/pairing/setup failures when the local OpenClaw runtime is not ready
+- logs bridge session ids so failed runs are easier to trace in `logs/agent-*.log`
 
 ---
 
