@@ -33,14 +33,14 @@ Meridian runs a **ReAct agent loop** — each cycle the LLM reasons over live da
 - Pool screening API — fee/TVL ratios, volume, organic scores, holder counts
 - Jupiter API — token audit, mcap, launchpad, price stats
 
-Agents are powered via **OpenRouter** and can be swapped for any compatible model.
+Agents default to the **OpenAI-compatible runtime** (OpenRouter/OpenAI/LM Studio/Ollama/custom) and can now also be pointed at an **OpenClaw/Codex local bridge runtime** for auth/runtime experiments.
 
 ---
 
 ## Requirements
 
 - Node.js 18+
-- [OpenRouter](https://openrouter.ai) API key
+- Either an OpenAI-compatible provider key (OpenRouter/OpenAI/etc.) or a local `openclaw` CLI/gateway install for the OpenClaw/Codex bridge mode
 - Solana wallet (base58 private key)
 - Solana RPC endpoint ([Helius](https://helius.xyz) recommended)
 - Telegram bot token (optional)
@@ -64,7 +64,7 @@ npm install
 npm run setup
 ```
 
-The wizard walks you through creating `.env` (API keys, wallet, RPC, Telegram) and `user-config.json` (risk preset, deploy size, thresholds, models). Takes about 2 minutes.
+The wizard walks you through creating `.env` (API keys, wallet, RPC, Telegram) and `user-config.json` (risk preset, deploy size, thresholds, runtime, models). Takes about 2 minutes.
 
 **Or set up manually:**
 
@@ -73,7 +73,11 @@ Create `.env`:
 ```env
 WALLET_PRIVATE_KEY=your_base58_private_key
 RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
-OPENROUTER_API_KEY=sk-or-...
+LLM_RUNTIME=openai-chat                # or `openclaw-codex`
+OPENROUTER_API_KEY=sk-or-...            # OpenAI-compatible runtime
+# OPENCLAW_AGENT_COMMAND=openclaw       # OpenClaw/Codex bridge runtime
+# OPENCLAW_AGENT_TIMEOUT_MS=300000
+# OPENCLAW_AGENT_EXTRA_ARGS=--thinking low
 HELIUS_API_KEY=your_helius_key          # for wallet balance lookups
 TELEGRAM_BOT_TOKEN=123456:ABC...        # optional — for notifications + chat
 TELEGRAM_CHAT_ID=                       # auto-filled on first message
@@ -419,6 +423,7 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 
 | Field | Default | Description |
 |---|---|---|
+| `llmRuntime` | `openai-chat` | Runtime mode: `openai-chat` (default) or `openclaw-codex` |
 | `managementModel` | `openai/gpt-oss-20b:free` | LLM for management cycles |
 | `screeningModel` | `openai/gpt-oss-20b:free` | LLM for screening cycles |
 | `generalModel` | `openai/gpt-oss-20b:free` | LLM for REPL / chat |
@@ -522,6 +527,20 @@ LLM_MODEL=your-local-model-name
 ```
 
 Any OpenAI-compatible endpoint works.
+
+## Using the OpenClaw runtime (MVP)
+
+Set the runtime explicitly in either `.env` or `user-config.json`:
+
+```env
+LLM_RUNTIME=openclaw-codex
+OPENCLAW_AGENT_COMMAND=openclaw
+OPENCLAW_AGENT_TIMEOUT_MS=300000
+OPENCLAW_AGENT_SESSION_PREFIX=meridian-openclaw-bridge
+OPENCLAW_AGENT_EXTRA_ARGS=--thinking low
+```
+
+This MVP uses the local `openclaw agent` CLI as a bridge runtime. The explicit runtime switch keeps OpenClaw-specific process/auth plumbing separate from the default OpenAI-compatible path, so the old flow keeps working unchanged.
 
 ---
 

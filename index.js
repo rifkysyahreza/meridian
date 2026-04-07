@@ -19,7 +19,8 @@ import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
-log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
+log("startup", `LLM runtime: ${config.llm.runtime}`);
+log("startup", `Model: ${process.env.LLM_MODEL || process.env.OPENCLAW_MODEL || "hermes-3-405b"}`);
 
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;

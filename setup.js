@@ -14,6 +14,18 @@ const CONFIG_PATH = path.join(__dirname, "user-config.json");
 const ENV_PATH    = path.join(__dirname, ".env");
 
 const DEFAULT_MODEL = "openai/gpt-oss-20b:free";
+const DEFAULT_OPENCLAW_COMMAND = "openclaw";
+
+const RUNTIMES = [
+  {
+    label: "OpenAI-compatible (OpenRouter/OpenAI/LM Studio/Ollama/custom)",
+    key: "openai-chat",
+  },
+  {
+    label: "OpenClaw/Codex local bridge (MVP)",
+    key: "openclaw-codex",
+  },
+];
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
@@ -288,8 +300,19 @@ const screeningIntervalMin = await askNum(
   { min: 5 }
 );
 
-// ─── Section 8: LLM Provider ─────────────────────────────────────────────────
-console.log("\n── LLM Provider ──────────────────────────────────────────────");
+// ─── Section 8: LLM Runtime ──────────────────────────────────────────────────
+console.log("\n── LLM Runtime ───────────────────────────────────────────────");
+
+const runtimeChoice = await askChoice("Select LLM runtime:", RUNTIMES.map((r) => ({ label: r.label, key: r.key })));
+const llmRuntime = runtimeChoice.key === "openclaw" ? "openclaw-codex" : runtimeChoice.key;
+
+console.log(llmRuntime === "openclaw-codex"
+  ? "\nUsing OpenClaw/Codex bridge mode. Configure the local OpenClaw command below.\n"
+  : "\nUsing OpenAI-compatible runtime mode. Pick a provider below.\n"
+);
+
+// ─── Section 9: LLM Provider / Endpoint ──────────────────────────────────────
+console.log("\n── LLM Provider / Endpoint ───────────────────────────────────");
 
 const LLM_PROVIDERS = [
   {
@@ -329,22 +352,50 @@ const LLM_PROVIDERS = [
   },
 ];
 
-const providerChoice = await askChoice("Select LLM provider:", LLM_PROVIDERS.map((p) => ({ label: p.label, key: p.key })));
-const provider = LLM_PROVIDERS.find((p) => p.key === providerChoice.key);
+let provider = { label: "OpenClaw/Codex bridge", key: "openclaw-codex", modelDefault: DEFAULT_MODEL };
+let llmBaseUrl = e("llmBaseUrl", "");
+let llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
+let llmApiKey = llmApiKeyExisting;
+let llmModelDefault = e("llmModel", process.env.LLM_MODEL || provider.modelDefault);
+let openClawAgentCommand = e("openClawAgentCommand", existingEnv.OPENCLAW_AGENT_COMMAND || DEFAULT_OPENCLAW_COMMAND);
+let openClawAgentTimeoutMs = e("openClawAgentTimeoutMs", parseInt(existingEnv.OPENCLAW_AGENT_TIMEOUT_MS || "300000", 10));
+let openClawAgentSessionPrefix = e("openClawAgentSessionPrefix", existingEnv.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge");
+let openClawAgentExtraArgs = e("openClawAgentExtraArgs", existingEnv.OPENCLAW_AGENT_EXTRA_ARGS || "--thinking low");
 
-let llmBaseUrl = provider.baseUrl;
-if (provider.key === "local" || provider.key === "custom") {
-  llmBaseUrl = await ask("Base URL", e("llmBaseUrl", provider.baseUrl || "http://localhost:1234/v1"));
+if (llmRuntime === "openai-chat") {
+  const providerChoice = await askChoice("Select LLM provider:", LLM_PROVIDERS.map((p) => ({ label: p.label, key: p.key })));
+  provider = LLM_PROVIDERS.find((p) => p.key === providerChoice.key);
+
+  llmBaseUrl = provider.baseUrl;
+  if (provider.key === "local" || provider.key === "custom") {
+    llmBaseUrl = await ask("Base URL", e("llmBaseUrl", provider.baseUrl || "http://localhost:1234/v1"));
+  }
+
+  llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
+  const llmApiKeyRaw = await ask("API Key", llmApiKeyExisting ? "*** (already set)" : (provider.keyHint || ""));
+  llmApiKey = llmApiKeyRaw.startsWith("***") ? llmApiKeyExisting : llmApiKeyRaw;
+  llmModelDefault = e("llmModel", process.env.LLM_MODEL || provider.modelDefault);
+} else {
+  openClawAgentCommand = await ask("OpenClaw command", e("openClawAgentCommand", existingEnv.OPENCLAW_AGENT_COMMAND || DEFAULT_OPENCLAW_COMMAND));
+  openClawAgentTimeoutMs = await askNum(
+    "OpenClaw timeout (ms)",
+    e("openClawAgentTimeoutMs", parseInt(existingEnv.OPENCLAW_AGENT_TIMEOUT_MS || "300000", 10)),
+    { min: 1000 }
+  );
+  openClawAgentSessionPrefix = await ask(
+    "OpenClaw session prefix",
+    e("openClawAgentSessionPrefix", existingEnv.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge")
+  );
+  openClawAgentExtraArgs = await ask(
+    "OpenClaw extra args",
+    e("openClawAgentExtraArgs", existingEnv.OPENCLAW_AGENT_EXTRA_ARGS || "--thinking low")
+  );
+  llmBaseUrl = "";
+  llmApiKey = "";
+  llmModelDefault = e("llmModel", process.env.OPENCLAW_MODEL || process.env.LLM_MODEL || DEFAULT_MODEL);
 }
 
-const llmApiKeyExisting = e("llmApiKey", existingEnv.LLM_API_KEY || existingEnv.OPENROUTER_API_KEY || "");
-const llmApiKeyRaw = await ask("API Key", llmApiKeyExisting ? "*** (already set)" : (provider.keyHint || ""));
-const llmApiKey   = llmApiKeyRaw.startsWith("***") ? llmApiKeyExisting : llmApiKeyRaw;
-
-const llmModel = await ask(
-  "Model name",
-  e("llmModel", process.env.LLM_MODEL || provider.modelDefault)
-);
+const llmModel = await ask("Model name", llmModelDefault);
 
 rl.close();
 
@@ -359,6 +410,11 @@ const envMap = {
   ...(isKept(heliusKey)     ? {} : { HELIUS_API_KEY: heliusKey }),
   ...(isKept(telegramToken) ? {} : { TELEGRAM_BOT_TOKEN: telegramToken }),
   ...(telegramChatId        ? { TELEGRAM_CHAT_ID: telegramChatId } : {}),
+  ...(llmRuntime            ? { LLM_RUNTIME: llmRuntime } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { OPENCLAW_AGENT_COMMAND: openClawAgentCommand } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { OPENCLAW_AGENT_TIMEOUT_MS: String(openClawAgentTimeoutMs) } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { OPENCLAW_AGENT_SESSION_PREFIX: openClawAgentSessionPrefix } : {}),
+  ...(llmRuntime === "openclaw-codex" && openClawAgentExtraArgs ? { OPENCLAW_AGENT_EXTRA_ARGS: openClawAgentExtraArgs } : {}),
   DRY_RUN: dryRun ? "true" : "false",
 };
 fs.writeFileSync(ENV_PATH, buildEnv(envMap));
@@ -380,10 +436,15 @@ const userConfig = {
   outOfRangeWaitMinutes,
   managementIntervalMin,
   screeningIntervalMin,
+  llmRuntime,
   llmProvider: provider.key,
   llmBaseUrl,
   llmModel,
   ...(llmApiKey ? { llmApiKey } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { openClawAgentCommand } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { openClawAgentTimeoutMs } : {}),
+  ...(llmRuntime === "openclaw-codex" ? { openClawAgentSessionPrefix } : {}),
+  ...(llmRuntime === "openclaw-codex" && openClawAgentExtraArgs ? { openClawAgentExtraArgs } : {}),
   telegramChatId: telegramChatId || "",
   dryRun,
 };
@@ -412,9 +473,10 @@ console.log(`
   OOR close:    after ${outOfRangeWaitMinutes} min
 
   Cycles:       management every ${managementIntervalMin}m  ·  screening every ${screeningIntervalMin}m
+  Runtime:      ${llmRuntime}
   Provider:     ${provider.label.split("(")[0].trim()}
   Model:        ${llmModel}
-  Base URL:     ${llmBaseUrl}
+  Bridge:       ${llmRuntime === "openclaw-codex" ? openClawAgentCommand : llmBaseUrl}
 
   Telegram:     ${telegramToken ? "enabled" : "disabled"}
   .env:         ${ENV_PATH}

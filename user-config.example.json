@@ -1,6 +1,11 @@
 {
   "preset": "custom",
   "rpcUrl": "https://pump.helius-rpc.com",
+  "llmRuntime": "openai-chat",
+  "openClawAgentCommand": "openclaw",
+  "openClawAgentTimeoutMs": 300000,
+  "openClawAgentSessionPrefix": "meridian-openclaw-bridge",
+  "openClawAgentExtraArgs": "--thinking low",
   "llmBaseUrl": "",
   "llmApiKey": "",
   "llmModel": "minimax/minimax-m2.7",
