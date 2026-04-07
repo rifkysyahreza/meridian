@@ -1,8 +1,13 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import crypto from "crypto";
+import { log } from "../logger.js";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_BUFFER = 1024 * 1024 * 8;
+const TRANSIENT_BRIDGE_ERROR = /\b(ECONNRESET|ETIMEDOUT|timeout|timed out|429|502|503|504|529|rate limit|temporar(?:y|ily)|unavailable|network|socket hang up)\b/i;
+const AUTH_BRIDGE_ERROR = /\b(auth|login|unauthori[sz]ed|forbidden|api[_ -]?key|token|pairing required|bootstrap token|not logged in|expired)\b/i;
 
 function normalizeToolDefinitions(tools = []) {
   return tools.map((tool) => ({
@@ -41,10 +46,129 @@ function buildBridgePrompt({ model, messages, tools, toolChoice, temperature, ma
   ].join("\n");
 }
 
+function shellSplit(input = "") {
+  const text = String(input || "").trim();
+  if (!text) return [];
+
+  const parts = [];
+  let current = "";
+  let quote = null;
+  let escaping = false;
+
+  for (const char of text) {
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaping = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (escaping) current += "\\";
+  if (current) parts.push(current);
+  return parts;
+}
+
+function collectText(value, acc = []) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed) acc.push(trimmed);
+    return acc;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectText(item, acc);
+    return acc;
+  }
+
+  if (value && typeof value === "object") {
+    if (typeof value.text === "string") collectText(value.text, acc);
+    if (typeof value.content === "string") collectText(value.content, acc);
+    if (Array.isArray(value.content)) collectText(value.content, acc);
+    if (Array.isArray(value.payloads)) collectText(value.payloads, acc);
+    if (Array.isArray(value.messages)) collectText(value.messages, acc);
+  }
+
+  return acc;
+}
+
 function extractText(result) {
-  if (typeof result?.payloads?.[0]?.text === "string") return result.payloads[0].text.trim();
-  if (typeof result?.text === "string") return result.text.trim();
-  return "";
+  return collectText(result).join("\n").trim();
+}
+
+function findJsonObjectCandidates(text) {
+  if (!text) return [];
+  const candidates = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaping = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaping) {
+        escaping = false;
+      } else if (char === "\\") {
+        escaping = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          candidates.push(text.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+  }
+
+  return candidates;
 }
 
 function tryParseJsonObject(text) {
@@ -54,11 +178,10 @@ function tryParseJsonObject(text) {
     return JSON.parse(text);
   } catch {}
 
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) {
+  const candidates = findJsonObjectCandidates(text);
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
     try {
-      return JSON.parse(text.slice(start, end + 1));
+      return JSON.parse(candidates[i]);
     } catch {}
   }
 
@@ -91,78 +214,166 @@ function normalizeBridgeMessage(parsed, rawText) {
   };
 }
 
+function buildBridgeError(message, context = {}) {
+  const error = new Error(message);
+  error.bridge = context;
+  return error;
+}
+
+function classifyBridgeFailure(text) {
+  if (AUTH_BRIDGE_ERROR.test(text)) return "auth";
+  if (TRANSIENT_BRIDGE_ERROR.test(text)) return "transient";
+  return "fatal";
+}
+
+function formatBridgeFailure(baseMessage, details, context = {}) {
+  const trimmedDetails = String(details || "").trim();
+  const sessionNote = context.sessionId ? ` [session=${context.sessionId}]` : "";
+  return `${baseMessage}${sessionNote}${trimmedDetails ? `: ${trimmedDetails}` : ""}`;
+}
+
 export function createOpenClawCodexRuntime(options = {}) {
   const command = options.command || process.env.OPENCLAW_AGENT_COMMAND || "openclaw";
-  const timeout = Number(options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS ?? 5 * 60 * 1000);
+  const timeout = Number(options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
   const sessionPrefix = options.sessionPrefix || process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge";
   const extraArgs = Array.isArray(options.extraArgs)
     ? options.extraArgs
-    : String(process.env.OPENCLAW_AGENT_EXTRA_ARGS || "").split(/\s+/).filter(Boolean);
+    : shellSplit(process.env.OPENCLAW_AGENT_EXTRA_ARGS || "");
+  const maxRetries = Math.max(1, Number(options.maxRetries ?? process.env.OPENCLAW_AGENT_MAX_RETRIES ?? 2));
 
   return {
     name: "openclaw-codex",
     async createChatCompletion(request) {
       const prompt = buildBridgePrompt(request);
-      const sessionId = `${sessionPrefix}-${crypto.randomUUID()}`;
-      const args = [
-        "agent",
-        "--local",
-        "--json",
-        "--session-id",
-        sessionId,
-        "--message",
-        prompt,
-        ...extraArgs,
-      ];
+      const toolsCount = Array.isArray(request?.tools) ? request.tools.length : 0;
+      let lastError = null;
 
-      let stdout;
-      let stderr;
-      try {
-        ({ stdout, stderr } = await execFileAsync(command, args, {
-          timeout,
-          maxBuffer: 1024 * 1024 * 8,
-          env: process.env,
-        }));
-      } catch (error) {
-        if (error?.code === "ENOENT") {
-          throw new Error(`OpenClaw runtime selected but '${command}' is not installed or not on PATH.`);
-        }
-        const stderr = error?.stderr ? String(error.stderr).trim() : "";
-        const stdout = error?.stdout ? String(error.stdout).trim() : "";
-        throw new Error(
-          `OpenClaw runtime bridge failed: ${stderr || stdout || error.message}`
-        );
-      }
-
-      const parsedResult = tryParseJsonObject(stdout) || tryParseJsonObject(`${stdout || ""}\n${stderr || ""}`);
-      if (!parsedResult) {
-        throw new Error("OpenClaw runtime bridge returned output that did not contain a JSON result.");
-      }
-
-      const rawText = extractText(parsedResult);
-      const parsedMessage = tryParseJsonObject(rawText);
-      const message = normalizeBridgeMessage(parsedMessage, rawText);
-
-      return {
-        id: parsedResult?.meta?.agentMeta?.sessionId || sessionId,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: parsedResult?.meta?.agentMeta?.model || request.model || "openclaw-codex",
-        choices: [
-          {
-            index: 0,
-            message,
-            finish_reason: parsedResult?.payloads?.stopReason || parsedResult?.stopReason || "stop",
-          },
-        ],
-        usage: parsedResult?.meta?.agentMeta?.usage,
-        bridge: {
-          provider: parsedResult?.meta?.agentMeta?.provider || "openclaw-codex",
+      for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+        const sessionId = `${sessionPrefix}-${crypto.randomUUID()}`;
+        const args = [
+          "agent",
+          "--local",
+          "--json",
+          "--session-id",
           sessionId,
-          rawText,
-          parsed: Boolean(parsedMessage),
-        },
-      };
+          "--message",
+          prompt,
+          ...extraArgs,
+        ];
+
+        const startedAt = Date.now();
+        log("bridge", `OpenClaw request starting (attempt ${attempt}/${maxRetries}, model=${request.model || "openclaw-codex"}, tools=${toolsCount}, session=${sessionId})`);
+
+        let stdout = "";
+        let stderr = "";
+        try {
+          ({ stdout, stderr } = await execFileAsync(command, args, {
+            timeout,
+            maxBuffer: DEFAULT_MAX_BUFFER,
+            env: process.env,
+          }));
+        } catch (error) {
+          if (error?.code === "ENOENT") {
+            throw buildBridgeError(
+              `OpenClaw runtime selected but '${command}' is not installed or not on PATH.`,
+              { code: error.code, sessionId, attempt, command }
+            );
+          }
+
+          const details = [error?.stderr, error?.stdout, error?.message].filter(Boolean).join("\n").trim();
+          const failureType = classifyBridgeFailure(details);
+          const durationMs = Date.now() - startedAt;
+          log(failureType === "auth" ? "bridge_error" : failureType === "transient" ? "bridge_warn" : "bridge_error", `OpenClaw bridge exec failed after ${durationMs}ms (attempt ${attempt}/${maxRetries}, session=${sessionId}): ${details || error.message}`);
+
+          if (failureType === "auth") {
+            throw buildBridgeError(
+              formatBridgeFailure(
+                "OpenClaw runtime bridge authentication failed. Make sure the local OpenClaw runtime is logged in/paired and any required API key or auth flow is complete",
+                details,
+                { sessionId }
+              ),
+              { type: failureType, sessionId, attempt, details }
+            );
+          }
+
+          if (failureType === "transient" && attempt < maxRetries) {
+            const waitMs = attempt * 1500;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+
+          lastError = buildBridgeError(
+            formatBridgeFailure("OpenClaw runtime bridge failed", details, { sessionId }),
+            { type: failureType, sessionId, attempt, details }
+          );
+          break;
+        }
+
+        const parsedResult = tryParseJsonObject(stdout) || tryParseJsonObject(`${stdout || ""}\n${stderr || ""}`);
+        if (!parsedResult) {
+          const combined = `${stdout || ""}\n${stderr || ""}`.trim();
+          const failureType = classifyBridgeFailure(combined);
+          const durationMs = Date.now() - startedAt;
+          log(failureType === "transient" ? "bridge_warn" : "bridge_error", `OpenClaw bridge returned non-JSON output after ${durationMs}ms (attempt ${attempt}/${maxRetries}, session=${sessionId}): ${combined.slice(0, 500) || "<empty>"}`);
+
+          if (failureType === "transient" && attempt < maxRetries) {
+            const waitMs = attempt * 1500;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+
+          if (failureType === "auth") {
+            throw buildBridgeError(
+              formatBridgeFailure(
+                "OpenClaw runtime returned an authentication/setup error instead of JSON. Verify the local runtime is ready before using bridge mode",
+                combined,
+                { sessionId }
+              ),
+              { type: failureType, sessionId, attempt, details: combined }
+            );
+          }
+
+          lastError = buildBridgeError(
+            formatBridgeFailure(
+              "OpenClaw runtime bridge returned output that did not contain a JSON result",
+              combined || "empty stdout/stderr",
+              { sessionId }
+            ),
+            { type: failureType, sessionId, attempt, details: combined }
+          );
+          break;
+        }
+
+        const rawText = extractText(parsedResult);
+        const parsedMessage = tryParseJsonObject(rawText);
+        const message = normalizeBridgeMessage(parsedMessage, rawText);
+        const durationMs = Date.now() - startedAt;
+        log("bridge", `OpenClaw request completed in ${durationMs}ms (attempt ${attempt}/${maxRetries}, parsed=${Boolean(parsedMessage)}, session=${sessionId})`);
+
+        return {
+          id: parsedResult?.meta?.agentMeta?.sessionId || sessionId,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: parsedResult?.meta?.agentMeta?.model || request.model || "openclaw-codex",
+          choices: [
+            {
+              index: 0,
+              message,
+              finish_reason: parsedResult?.payloads?.stopReason || parsedResult?.stopReason || "stop",
+            },
+          ],
+          usage: parsedResult?.meta?.agentMeta?.usage,
+          bridge: {
+            provider: parsedResult?.meta?.agentMeta?.provider || "openclaw-codex",
+            sessionId,
+            rawText,
+            parsed: Boolean(parsedMessage),
+            stderr: String(stderr || "").trim() || undefined,
+          },
+        };
+      }
+
+      throw lastError || new Error("OpenClaw runtime bridge failed for an unknown reason.");
     },
   };
 }

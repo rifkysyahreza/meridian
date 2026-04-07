@@ -21,6 +21,10 @@ log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `LLM runtime: ${config.llm.runtime}`);
 log("startup", `Model: ${process.env.LLM_MODEL || process.env.OPENCLAW_MODEL || "hermes-3-405b"}`);
+if (config.llm.runtime === "openclaw-codex") {
+  log("startup", `OpenClaw command: ${process.env.OPENCLAW_AGENT_COMMAND || "openclaw"}`);
+  log("startup", `OpenClaw session prefix: ${process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge"}`);
+}
 
 const TP_PCT = config.management.takeProfitFeePct;
 const DEPLOY = config.management.deployAmountSol;

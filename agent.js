@@ -311,7 +311,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       messages.push(...toolResults);
     } catch (error) {
-      log("error", `Agent loop error at step ${step}: ${error.message}`);
+      const bridgeSession = error?.bridge?.sessionId ? ` [bridge session=${error.bridge.sessionId}]` : "";
+      log("error", `Agent loop error at step ${step}: ${error.message}${bridgeSession}`);
 
       if (error.status === 429) {
         log("agent", "Rate limited, waiting 30s...");
