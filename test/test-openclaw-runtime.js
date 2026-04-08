@@ -51,6 +51,39 @@ console.log(JSON.stringify({
   });
 }
 
+async function testEmptyLogicalResultFails() {
+  await withFakeBridge(`
+console.log(JSON.stringify({
+  payloads: [{ text: JSON.stringify({ content: null, tool_calls: [] }) }],
+  stopReason: "stop",
+  meta: { agentMeta: { provider: "fake", model: "fake-model" } },
+}));
+`, async (scriptPath) => {
+    const runtime = createOpenClawCodexRuntime({
+      command: scriptPath,
+      extraArgs: [],
+      timeout: 5000,
+      maxRetries: 1,
+      sessionPrefix: "test-openclaw",
+    });
+
+    let sawExpectedError = false;
+    try {
+      await runtime.createChatCompletion({
+        model: "fake-model",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [],
+      });
+    } catch (error) {
+      sawExpectedError = /parsed but empty assistant turn/i.test(error.message);
+    }
+
+    if (!sawExpectedError) {
+      throw new Error("Expected parsed-but-empty result to fail");
+    }
+  });
+}
+
 async function testAuthErrorMessage() {
   await withFakeBridge(`
 console.error("Unauthorized: not logged in to OpenClaw yet");
@@ -85,6 +118,8 @@ async function main() {
   console.log("=== Testing OpenClaw bridge runtime ===");
   await testParsesNoisyJsonl();
   console.log("✓ parses noisy JSON output");
+  await testEmptyLogicalResultFails();
+  console.log("✓ rejects parsed but empty logical result");
   await testAuthErrorMessage();
   console.log("✓ surfaces auth guidance");
   console.log("=== OpenClaw bridge tests passed ===");

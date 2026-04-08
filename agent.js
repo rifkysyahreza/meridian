@@ -230,7 +230,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       if (!msg.toolCalls || msg.toolCalls.length === 0) {
         if (!msg.content) {
           messages.pop();
-          log("agent", "Empty response, retrying...");
+          const bridgeSessionId = response?.raw?.bridge?.sessionId;
+          const bridgeParsed = response?.raw?.bridge?.parsed;
+          log("agent_warn", `Empty assistant response, retrying...${bridgeSessionId ? ` session=${bridgeSessionId}` : ""}${bridgeParsed !== undefined ? ` parsed=${bridgeParsed}` : ""}`);
+          noToolRetryCount += 1;
+          if (noToolRetryCount >= 2) {
+            throw new Error(`Repeated empty assistant responses${bridgeSessionId ? ` from bridge session ${bridgeSessionId}` : ""}`);
+          }
           continue;
         }
         if (mustUseRealTool && !sawToolCall) {
