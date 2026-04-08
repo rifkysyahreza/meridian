@@ -180,6 +180,23 @@ function tryParseJsonObject(text) {
     return JSON.parse(text);
   } catch {}
 
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      return JSON.parse(lines[i]);
+    } catch {}
+  }
+
+  const fenced = String(text).match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    try {
+      return JSON.parse(fenced[1]);
+    } catch {}
+  }
+
   const candidates = findJsonObjectCandidates(text);
   for (let i = candidates.length - 1; i >= 0; i -= 1) {
     try {
@@ -229,9 +246,13 @@ function classifyBridgeFailure(text) {
   return "fatal";
 }
 
-function toPositiveInt(value, fallback) {
+function toPositiveInt(value, fallback, label = "value") {
+  if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return Math.floor(parsed);
 }
 
 function validateSessionPrefix(prefix) {
@@ -261,11 +282,28 @@ function logBridgeEvent(kind, fields = {}) {
 
 export function validateOpenClawRuntimeConfig(options = {}) {
   const command = options.command || process.env.OPENCLAW_AGENT_COMMAND || "openclaw";
-  const timeout = toPositiveInt(options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const timeout = toPositiveInt(
+    options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS,
+    DEFAULT_TIMEOUT_MS,
+    "OPENCLAW_AGENT_TIMEOUT_MS",
+  );
   const sessionPrefix = validateSessionPrefix(
     options.sessionPrefix || process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge",
   );
-  const maxRetries = Math.max(1, toPositiveInt(options.maxRetries ?? process.env.OPENCLAW_AGENT_MAX_RETRIES, 2));
+  const maxRetries = Math.max(
+    1,
+    toPositiveInt(
+      options.maxRetries ?? process.env.OPENCLAW_AGENT_MAX_RETRIES,
+      2,
+      "OPENCLAW_AGENT_MAX_RETRIES",
+    ),
+  );
+  if (timeout > 30 * 60 * 1000) {
+    throw new Error("OPENCLAW_AGENT_TIMEOUT_MS is too large; keep it at or below 1800000 ms.");
+  }
+  if (maxRetries > 10) {
+    throw new Error("OPENCLAW_AGENT_MAX_RETRIES is too large; keep it at or below 10.");
+  }
 
   const resolved = command.includes("/")
     ? (fs.existsSync(command) ? command : null)
@@ -419,7 +457,7 @@ export function createOpenClawCodexRuntime(options = {}) {
         const parsedResult = tryParseJsonObject(stdout) || tryParseJsonObject(`${stdout || ""}\n${stderr || ""}`);
         if (!parsedResult) {
           const combined = `${stdout || ""}\n${stderr || ""}`.trim();
-          const failureType = classifyBridgeFailure(combined);
+          const failureType = classifyBridgeFailure(combined || "empty output");
           const durationMs = Date.now() - startedAt;
           logBridgeEvent(
             failureType === "transient" || failureType === "malformed" ? "bridge_warn" : "bridge_error",
