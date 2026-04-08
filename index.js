@@ -3,6 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
+import { preflightRuntime } from "./llm/runtime.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
@@ -24,6 +25,16 @@ log("startup", `Model: ${process.env.LLM_MODEL || process.env.OPENCLAW_MODEL || 
 if (config.llm.runtime === "openclaw-codex") {
   log("startup", `OpenClaw command: ${process.env.OPENCLAW_AGENT_COMMAND || "openclaw"}`);
   log("startup", `OpenClaw session prefix: ${process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge"}`);
+}
+
+try {
+  const preflight = await preflightRuntime({ mode: config.llm.runtime });
+  if (config.llm.runtime === "openclaw-codex") {
+    log("startup", `OpenClaw preflight ok (session=${preflight.sessionId || "n/a"})`);
+  }
+} catch (error) {
+  log("startup_error", `Runtime preflight failed: ${error.message}`);
+  process.exit(1);
 }
 
 const TP_PCT = config.management.takeProfitFeePct;

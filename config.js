@@ -5,9 +5,17 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
 
-const u = fs.existsSync(USER_CONFIG_PATH)
-  ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
-  : {};
+function readUserConfig() {
+  if (!fs.existsSync(USER_CONFIG_PATH)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"));
+  } catch (error) {
+    console.error(`[CONFIG_ERROR] Failed to parse user-config.json: ${error.message}`);
+    return {};
+  }
+}
+
+const u = readUserConfig();
 
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl) process.env.RPC_URL ||= u.rpcUrl;
@@ -142,7 +150,7 @@ export function reloadScreeningThresholds() {
     if (fresh.athFilterPct !== undefined) s.athFilterPct = fresh.athFilterPct;
     if (fresh.maxBundlePct != null) s.maxBundlePct = fresh.maxBundlePct;
     if (fresh.maxBotHoldersPct != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
-  } catch {
-    /* ignore */
+  } catch (error) {
+    console.error(`[CONFIG_WARN] Failed to reload screening thresholds: ${error.message}`);
   }
 }

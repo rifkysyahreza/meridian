@@ -1,5 +1,5 @@
 import { createOpenAICompatibleRuntime } from "./openai-compatible.js";
-import { createOpenClawCodexRuntime } from "./openclaw-codex.js";
+import { createOpenClawCodexRuntime, validateOpenClawRuntimeConfig, preflightOpenClawRuntime } from "./openclaw-codex.js";
 
 function normalizeAssistantMessage(message = {}) {
   return {
@@ -62,6 +62,15 @@ function resolveMode(mode) {
     default:
       throw new Error(`Unsupported LLM runtime: ${mode}`);
   }
+}
+
+export async function preflightRuntime(options = {}) {
+  const mode = resolveMode(options.mode || process.env.LLM_RUNTIME || "openai-chat");
+  if (mode === "openclaw-codex") {
+    validateOpenClawRuntimeConfig(options);
+    return await preflightOpenClawRuntime(options);
+  }
+  return { ok: true, mode };
 }
 
 export function createRuntime(options = {}) {

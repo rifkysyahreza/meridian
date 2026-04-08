@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import crypto from "crypto";
+import fs from "fs";
 import { log } from "../logger.js";
 
 const execFileAsync = promisify(execFile);
@@ -8,6 +9,7 @@ const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BUFFER = 1024 * 1024 * 8;
 const TRANSIENT_BRIDGE_ERROR = /\b(ECONNRESET|ETIMEDOUT|timeout|timed out|429|502|503|504|529|rate limit|temporar(?:y|ily)|unavailable|network|socket hang up)\b/i;
 const AUTH_BRIDGE_ERROR = /\b(auth|login|unauthori[sz]ed|forbidden|api[_ -]?key|token|pairing required|bootstrap token|not logged in|expired)\b/i;
+const MALFORMED_BRIDGE_ERROR = /\b(empty stdout|empty stderr|empty output|unexpected end|unterminated|stringify|json|parse|invalid response|malformed|truncated|maxbuffer|max buffer)\b/i;
 
 function normalizeToolDefinitions(tools = []) {
   return tools.map((tool) => ({
@@ -223,7 +225,24 @@ function buildBridgeError(message, context = {}) {
 function classifyBridgeFailure(text) {
   if (AUTH_BRIDGE_ERROR.test(text)) return "auth";
   if (TRANSIENT_BRIDGE_ERROR.test(text)) return "transient";
+  if (MALFORMED_BRIDGE_ERROR.test(text)) return "malformed";
   return "fatal";
+}
+
+function toPositiveInt(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function validateSessionPrefix(prefix) {
+  const safe = String(prefix || "").trim();
+  if (!safe) {
+    throw new Error("OPENCLAW_AGENT_SESSION_PREFIX must be a non-empty string.");
+  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(safe)) {
+    throw new Error("OPENCLAW_AGENT_SESSION_PREFIX may only contain letters, numbers, dot, underscore, and dash.");
+  }
+  return safe;
 }
 
 function formatBridgeFailure(baseMessage, details, context = {}) {
@@ -232,14 +251,71 @@ function formatBridgeFailure(baseMessage, details, context = {}) {
   return `${baseMessage}${sessionNote}${trimmedDetails ? `: ${trimmedDetails}` : ""}`;
 }
 
-export function createOpenClawCodexRuntime(options = {}) {
+export function validateOpenClawRuntimeConfig(options = {}) {
   const command = options.command || process.env.OPENCLAW_AGENT_COMMAND || "openclaw";
-  const timeout = Number(options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-  const sessionPrefix = options.sessionPrefix || process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge";
+  const timeout = toPositiveInt(options.timeout ?? process.env.OPENCLAW_AGENT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+  const sessionPrefix = validateSessionPrefix(
+    options.sessionPrefix || process.env.OPENCLAW_AGENT_SESSION_PREFIX || "meridian-openclaw-bridge",
+  );
+  const maxRetries = Math.max(1, toPositiveInt(options.maxRetries ?? process.env.OPENCLAW_AGENT_MAX_RETRIES, 2));
+
+  const resolved = command.includes("/")
+    ? (fs.existsSync(command) ? command : null)
+    : (process.env.PATH || "")
+        .split(":")
+        .map((dir) => dir && `${dir}/${command}`)
+        .find((candidate) => candidate && fs.existsSync(candidate));
+
+  if (!resolved) {
+    throw new Error(`OpenClaw command '${command}' was not found on PATH.`);
+  }
+
+  return { command, timeout, sessionPrefix, maxRetries };
+}
+
+export async function preflightOpenClawRuntime(options = {}) {
+  const { command, timeout, sessionPrefix } = validateOpenClawRuntimeConfig(options);
+  const sessionId = `${sessionPrefix}-preflight-${crypto.randomUUID()}`;
+  const args = [
+    "agent",
+    "--local",
+    "--json",
+    "--session-id",
+    sessionId,
+    "--message",
+    'Return exactly {"content":"ok","tool_calls":[]} as JSON.',
+  ];
+  const { stdout, stderr } = await execFileAsync(command, args, {
+    timeout: Math.min(timeout, 60_000),
+    maxBuffer: DEFAULT_MAX_BUFFER,
+    env: process.env,
+  });
+  const parsed = tryParseJsonObject(stdout) || tryParseJsonObject(`${stdout || ""}\n${stderr || ""}`);
+  const rawText = extractText(parsed);
+  const inner = tryParseJsonObject(rawText);
+  const message = normalizeBridgeMessage(inner, rawText);
+  const hasUseful =
+    (typeof message.content === "string" && message.content.trim().length > 0) ||
+    (Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+  if (!parsed || !hasUseful) {
+    throw buildBridgeError("OpenClaw preflight returned no usable assistant message.", {
+      sessionId,
+      stdout: String(stdout || "").slice(0, 500),
+      stderr: String(stderr || "").slice(0, 500),
+    });
+  }
+  return { sessionId, message };
+}
+
+export function createOpenClawCodexRuntime(options = {}) {
+  const validated = validateOpenClawRuntimeConfig(options);
+  const command = validated.command;
+  const timeout = validated.timeout;
+  const sessionPrefix = validated.sessionPrefix;
   const extraArgs = Array.isArray(options.extraArgs)
     ? options.extraArgs
     : shellSplit(process.env.OPENCLAW_AGENT_EXTRA_ARGS || "");
-  const maxRetries = Math.max(1, Number(options.maxRetries ?? process.env.OPENCLAW_AGENT_MAX_RETRIES ?? 2));
+  const maxRetries = validated.maxRetries;
 
   return {
     name: "openclaw-codex",
@@ -281,7 +357,7 @@ export function createOpenClawCodexRuntime(options = {}) {
           }
 
           const details = [error?.stderr, error?.stdout, error?.message].filter(Boolean).join("\n").trim();
-          const failureType = classifyBridgeFailure(details);
+          const failureType = classifyBridgeFailure(details || `${error?.code || ""} ${error?.signal || ""}`);
           const durationMs = Date.now() - startedAt;
           log(failureType === "auth" ? "bridge_error" : failureType === "transient" ? "bridge_warn" : "bridge_error", `OpenClaw bridge exec failed after ${durationMs}ms (attempt ${attempt}/${maxRetries}, session=${sessionId}): ${details || error.message}`);
 
@@ -296,7 +372,7 @@ export function createOpenClawCodexRuntime(options = {}) {
             );
           }
 
-          if (failureType === "transient" && attempt < maxRetries) {
+          if ((failureType === "transient" || failureType === "malformed") && attempt < maxRetries) {
             const waitMs = attempt * 1500;
             await new Promise((resolve) => setTimeout(resolve, waitMs));
             continue;
@@ -316,7 +392,7 @@ export function createOpenClawCodexRuntime(options = {}) {
           const durationMs = Date.now() - startedAt;
           log(failureType === "transient" ? "bridge_warn" : "bridge_error", `OpenClaw bridge returned non-JSON output after ${durationMs}ms (attempt ${attempt}/${maxRetries}, session=${sessionId}): ${combined.slice(0, 500) || "<empty>"}`);
 
-          if (failureType === "transient" && attempt < maxRetries) {
+          if ((failureType === "transient" || failureType === "malformed") && attempt < maxRetries) {
             const waitMs = attempt * 1500;
             await new Promise((resolve) => setTimeout(resolve, waitMs));
             continue;
@@ -347,7 +423,25 @@ export function createOpenClawCodexRuntime(options = {}) {
         const rawText = extractText(parsedResult);
         const parsedMessage = tryParseJsonObject(rawText);
         const message = normalizeBridgeMessage(parsedMessage, rawText);
+        const hasUsefulMessage =
+          (typeof message.content === "string" && message.content.trim().length > 0) ||
+          (Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
         const durationMs = Date.now() - startedAt;
+
+        if (!hasUsefulMessage) {
+          const details = `Bridge produced no usable assistant content or tool calls. rawText=${String(rawText || "").slice(0, 300) || "<empty>"}`;
+          log("bridge_warn", `OpenClaw request produced empty logical result in ${durationMs}ms (attempt ${attempt}/${maxRetries}, session=${sessionId})`);
+          if (attempt < maxRetries) {
+            const waitMs = attempt * 1500;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+          throw buildBridgeError(
+            formatBridgeFailure("OpenClaw runtime bridge returned a parsed but empty assistant turn", details, { sessionId }),
+            { type: "malformed", sessionId, attempt, details }
+          );
+        }
+
         log("bridge", `OpenClaw request completed in ${durationMs}ms (attempt ${attempt}/${maxRetries}, parsed=${Boolean(parsedMessage)}, session=${sessionId})`);
 
         return {
